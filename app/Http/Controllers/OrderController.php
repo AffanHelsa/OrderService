@@ -159,6 +159,74 @@ class OrderController extends Controller
 
         return new OrderResource('Success', 'Status order berhasil diupdate', $order);
     }
+    public function updateQuantity(Request $request, $orderId, $itemId)
+{
+    $validator = Validator::make($request->all(), [
+        'quantity' => 'required|integer|min:1',
+    ]);
+
+    if ($validator->fails()) {
+        return new OrderResource('Failed', 'Validation error', $validator->errors());
+    }
+
+    // Cek order ada
+    $order = Order::find($orderId);
+    if (!$order) {
+        return new OrderResource('Failed', 'Order not found', null);
+    }
+
+    // Cek status order masih pending
+    if ($order->status !== 'pending') {
+        return new OrderResource('Failed', 'Order tidak dapat diubah karena status bukan pending', null);
+    }
+
+    // Cek item ada dan milik order ini
+    $item = OrderItem::where('id', $itemId)
+        ->where('order_id', $orderId)
+        ->first();
+
+    if (!$item) {
+        return new OrderResource('Failed', 'Item tidak ditemukan', null);
+    }
+
+    // Consume ProductService — cek stok mencukupi
+    $productResponse = Http::get(env('PRODUCT_SERVICE_URL') . '/api/products/' . $item->product_id);
+
+    if ($productResponse->failed()) {
+        return new OrderResource('Failed', 'Produk tidak ditemukan', null);
+    }
+
+    $product      = $productResponse->json('data');
+    $newQuantity  = $request->quantity;
+    $oldQuantity  = $item->quantity;
+    $selisih      = $newQuantity - $oldQuantity;
+
+    // Cek stok mencukupi jika quantity bertambah
+    if ($selisih > 0 && $product['stock'] < $selisih) {
+        return new OrderResource('Failed', 'Stok produk tidak mencukupi', null);
+    }
+
+    DB::beginTransaction();
+    try {
+        // Hitung ulang subtotal item
+        $newSubtotal = $item->price * $newQuantity;
+        $item->update([
+            'quantity' => $newQuantity,
+            'subtotal' => $newSubtotal,
+        ]);
+
+        // Hitung ulang total_price order
+        $newTotalPrice = $order->items()->sum('subtotal');
+        $order->update(['total_price' => $newTotalPrice]);
+
+        DB::commit();
+    } catch (\Exception $e) {
+        DB::rollBack();
+        return new OrderResource('Failed', 'Gagal update quantity: ' . $e->getMessage(), null);
+    }
+
+    return new OrderResource('Success', 'Quantity berhasil diupdate', $order->load('items'));
+}
     public function destroy($id)
 {
     $order = Order::with('items')->find($id);
